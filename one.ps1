@@ -1,11 +1,11 @@
-# Switch-Defaults.ps1
-# Переключение дефолтных ассоциаций в Windows 11 через DefaultAppAssociations XML + Policy (HKLM)
-# 1) 7-Zip: все расширения из Capabilities\FileAssociations
-# 2) Adobe Reader/Acrobat: все расширения из Capabilities\FileAssociations
-# 3) Yandex Browser: протоколы (http/https и др.) + web-расширения из Capabilities\URLAssociations и FileAssociations
+# one.ps1
+# Win11: переключение дефолтов через DefaultAppAssociations XML + HKLM Policy
+# 1) 7-Zip (все расширения из Capabilities\FileAssociations)
+# 2) Adobe Reader/Acrobat (все расширения из Capabilities\FileAssociations)
+# 3) Yandex Browser (протоколы + web-расширения из Capabilities\URLAssociations/FileAssociations)
 #
-# Требуются права администратора.
-# Применение ассоциаций происходит при следующем входе в систему (лучше сделать "выход" и войти снова).
+# ВАЖНО: применение дефолтов по поддерживаемому механизму происходит на входе в систему.
+# Скрипт делает максимум "сразу": ставит политику, чистит UserChoice, перезапускает Explorer.
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
@@ -16,9 +16,10 @@ function Test-IsAdmin {
     return $p.IsInRole([Security.Principal.WindowsBuiltinRole]::Administrator)
 }
 
-function Ensure-AdminOrFail {
+function Ensure-AdminOrDie {
     if (-not (Test-IsAdmin)) {
-        throw "Нужны права администратора. Запусти через CMD-лаунчер (он поднимет UAC) или запусти PowerShell от имени администратора."
+        Write-Host "Нужны права администратора. Запусти CMD от имени администратора." -ForegroundColor Red
+        exit 1
     }
 }
 
@@ -34,8 +35,7 @@ function Test-RegKeyExists {
         $key = $base.OpenSubKey($SubKeyPath)
         if ($key) { $key.Close(); return $true }
         return $false
-    }
-    finally { $base.Close() }
+    } finally { $base.Close() }
 }
 
 function Get-RegValueMap {
@@ -50,10 +50,8 @@ function Get-RegValueMap {
                 $map[$name] = [string]$key.GetValue($name)
             }
             return $map
-        }
-        finally { $key.Close() }
-    }
-    finally { $base.Close() }
+        } finally { $key.Close() }
+    } finally { $base.Close() }
 }
 
 function Get-RegValue {
@@ -64,8 +62,7 @@ function Get-RegValue {
         if (-not $key) { return $null }
         try { return $key.GetValue($ValueName) }
         finally { $key.Close() }
-    }
-    finally { $base.Close() }
+    } finally { $base.Close() }
 }
 
 function Find-CapabilitiesPathByRegisteredAppNameRegex {
@@ -76,7 +73,7 @@ function Find-CapabilitiesPathByRegisteredAppNameRegex {
         $regApps = Get-RegValueMap -Hive LocalMachine -View $view -SubKeyPath 'SOFTWARE\RegisteredApplications'
         foreach ($k in $regApps.Keys) {
             if ($k -match $NameRegex) {
-                return @{ View = $view; CapPath = $regApps[$k] } # например SOFTWARE\7-Zip\Capabilities
+                return @{ View = $view; CapPath = $regApps[$k] } # e.g. SOFTWARE\7-Zip\Capabilities
             }
         }
     }
@@ -91,11 +88,9 @@ function Read-CapabilitiesAssociations {
     )
 
     if ([string]::IsNullOrWhiteSpace($CapabilitiesPath)) { return @{} }
-
     $sub = "$CapabilitiesPath\$Type"
     if (-not (Test-RegKeyExists -Hive LocalMachine -View $View -SubKeyPath $sub)) { return @{} }
-
-    return Get-RegValueMap -Hive LocalMachine -View $View -SubKeyPath $sub
+    Get-RegValueMap -Hive LocalMachine -View $View -SubKeyPath $sub
 }
 
 function Get-CapabilitiesAppName {
@@ -111,7 +106,6 @@ function Get-CapabilitiesAppName {
 }
 
 function Find-YandexBrowserCapabilities {
-    # HKLM\SOFTWARE\Clients\StartMenuInternet\<browser>\Capabilities
     $basePath = 'SOFTWARE\Clients\StartMenuInternet'
     $views = @([Microsoft.Win32.RegistryView]::Registry64, [Microsoft.Win32.RegistryView]::Registry32)
 
@@ -131,21 +125,14 @@ function Find-YandexBrowserCapabilities {
                         return @{ View = $view; CapPath = $cap; ClientKey = $sub }
                     }
                 }
-            }
-            finally { $root.Close() }
-        }
-        finally { $base.Close() }
+            } finally { $root.Close() }
+        } finally { $base.Close() }
     }
-
     return $null
 }
 
 function Write-DefaultAssociationsXml {
-    param(
-        [string]$OutPath,
-        [hashtable]$Associations,
-        [string]$ApplicationName
-    )
+    param([string]$OutPath, [hashtable]$Associations, [string]$ApplicationName)
 
     $dir = Split-Path -Parent $OutPath
     if (-not (Test-Path $dir)) { New-Item -ItemType Directory -Path $dir -Force | Out-Null }
@@ -166,7 +153,6 @@ function Write-DefaultAssociationsXml {
     }
 
     [void]$sb.AppendLine('</DefaultAssociations>')
-
     $sb.ToString() | Set-Content -Path $OutPath -Encoding UTF8
 }
 
@@ -185,18 +171,13 @@ function Clear-UserChoice {
     foreach ($ext in $FileExts | Sort-Object -Unique) {
         $e = $ext
         if (-not $e.StartsWith(".")) { $e = ".$e" }
-
         $p = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\FileExts\$e\UserChoice"
-        if (Test-Path $p) {
-            Remove-Item -Path $p -Recurse -Force -ErrorAction SilentlyContinue
-        }
+        if (Test-Path $p) { Remove-Item -Path $p -Recurse -Force -ErrorAction SilentlyContinue }
     }
 
     foreach ($proto in $UrlProtocols | Sort-Object -Unique) {
         $p = "HKCU:\Software\Microsoft\Windows\Shell\Associations\UrlAssociations\$proto\UserChoice"
-        if (Test-Path $p) {
-            Remove-Item -Path $p -Recurse -Force -ErrorAction SilentlyContinue
-        }
+        if (Test-Path $p) { Remove-Item -Path $p -Recurse -Force -ErrorAction SilentlyContinue }
     }
 }
 
@@ -205,62 +186,61 @@ function Restart-Explorer {
     Start-Process explorer.exe | Out-Null
 }
 
-function Apply-7Zip {
-    Ensure-AdminOrFail
+function Try-GpUpdate {
+    try {
+        Start-Process -FilePath "gpupdate.exe" -ArgumentList "/target:computer","/force" -Wait -NoNewWindow | Out-Null
+    } catch { }
+}
 
-    $hit = Find-CapabilitiesPathByRegisteredAppNameRegex -NameRegex '(?i)7-zip|7zip'
-    if (-not $hit) { throw "Не нашёл 7-Zip в HKLM:\SOFTWARE\RegisteredApplications (приложение не установлено или не зарегистрировало Capabilities)." }
+function Apply-FromRegisteredApp {
+    param(
+        [string]$Title,
+        [string]$Regex,
+        [string]$XmlName
+    )
+
+    Ensure-AdminOrDie
+
+    $hit = Find-CapabilitiesPathByRegisteredAppNameRegex -NameRegex $Regex
+    if (-not $hit) { throw "Не найдено: $Title (нет записи в HKLM:\SOFTWARE\RegisteredApplications)." }
 
     $appName = Get-CapabilitiesAppName -View $hit.View -CapabilitiesPath $hit.CapPath
     $fileAssocs = Read-CapabilitiesAssociations -View $hit.View -CapabilitiesPath $hit.CapPath -Type FileAssociations
-    if ($fileAssocs.Count -eq 0) { throw "У 7-Zip не найдено Capabilities\FileAssociations." }
+    if ($fileAssocs.Count -eq 0) { throw "У $Title не найдено Capabilities\FileAssociations." }
 
-    $xml = "C:\ProgramData\DefaultAppAssoc\defaults-7zip.xml"
+    $xml = "C:\ProgramData\DefaultAppAssoc\$XmlName"
     Write-DefaultAssociationsXml -OutPath $xml -Associations $fileAssocs -ApplicationName $appName
     Set-DefaultAssociationsPolicy -XmlPath $xml
 
     Clear-UserChoice -FileExts $fileAssocs.Keys -UrlProtocols @()
+    Try-GpUpdate
     Restart-Explorer
 
-    Write-Host "7-Zip: записано ассоциаций: $($fileAssocs.Count)" -ForegroundColor Green
-    Write-Host "Политика указывает на: $xml" -ForegroundColor Green
+    Write-Host "Готово: $Title" -ForegroundColor Green
+    Write-Host "Ассоциаций записано: $($fileAssocs.Count)" -ForegroundColor Green
+    Write-Host "XML: $xml" -ForegroundColor DarkGray
+}
+
+function Apply-7Zip {
+    Apply-FromRegisteredApp -Title "7-Zip" -Regex '(?i)7-zip|7zip' -XmlName "defaults-7zip.xml"
 }
 
 function Apply-Adobe {
-    Ensure-AdminOrFail
-
-    $hit = Find-CapabilitiesPathByRegisteredAppNameRegex -NameRegex '(?i)acrobat|adobe.*reader|reader.*dc|adobe.*acrobat'
-    if (-not $hit) { throw "Не нашёл Adobe Reader/Acrobat в HKLM:\SOFTWARE\RegisteredApplications." }
-
-    $appName = Get-CapabilitiesAppName -View $hit.View -CapabilitiesPath $hit.CapPath
-    $fileAssocs = Read-CapabilitiesAssociations -View $hit.View -CapabilitiesPath $hit.CapPath -Type FileAssociations
-    if ($fileAssocs.Count -eq 0) { throw "У Adobe Reader/Acrobat не найдено Capabilities\FileAssociations." }
-
-    $xml = "C:\ProgramData\DefaultAppAssoc\defaults-adobe.xml"
-    Write-DefaultAssociationsXml -OutPath $xml -Associations $fileAssocs -ApplicationName $appName
-    Set-DefaultAssociationsPolicy -XmlPath $xml
-
-    Clear-UserChoice -FileExts $fileAssocs.Keys -UrlProtocols @()
-    Restart-Explorer
-
-    Write-Host "Adobe: записано ассоциаций: $($fileAssocs.Count)" -ForegroundColor Green
-    Write-Host "Политика указывает на: $xml" -ForegroundColor Green
+    Apply-FromRegisteredApp -Title "Adobe Reader/Acrobat" -Regex '(?i)acrobat|adobe.*reader|reader.*dc|adobe.*acrobat' -XmlName "defaults-adobe.xml"
 }
 
 function Apply-Yandex {
-    Ensure-AdminOrFail
+    Ensure-AdminOrDie
 
     $hit = Find-YandexBrowserCapabilities
-    if (-not $hit) { throw "Не нашёл Yandex Browser в HKLM:\SOFTWARE\Clients\StartMenuInternet (не установлен/не зарегистрирован как браузер)." }
+    if (-not $hit) { throw "Не найден Yandex Browser в HKLM:\SOFTWARE\Clients\StartMenuInternet." }
 
     $appName = Get-CapabilitiesAppName -View $hit.View -CapabilitiesPath $hit.CapPath
 
-    # У браузера это не RegisteredApplications, а Clients\StartMenuInternet\<...>\Capabilities\{FileAssociations,URLAssociations}
     $fileAssocs = Read-CapabilitiesAssociations -View $hit.View -CapabilitiesPath $hit.CapPath -Type FileAssociations
     $urlAssocs  = Read-CapabilitiesAssociations -View $hit.View -CapabilitiesPath $hit.CapPath -Type URLAssociations
-
     if ($fileAssocs.Count -eq 0 -and $urlAssocs.Count -eq 0) {
-        throw "У Yandex Browser не найдено Capabilities\URLAssociations и/или FileAssociations."
+        throw "У Yandex Browser не найдено Capabilities\FileAssociations/URLAssociations."
     }
 
     $merged = @{}
@@ -272,15 +252,17 @@ function Apply-Yandex {
     Set-DefaultAssociationsPolicy -XmlPath $xml
 
     Clear-UserChoice -FileExts $fileAssocs.Keys -UrlProtocols $urlAssocs.Keys
+    Try-GpUpdate
     Restart-Explorer
 
-    Write-Host "Yandex: записано ассоциаций: $($merged.Count) (файлы: $($fileAssocs.Count), протоколы: $($urlAssocs.Count))" -ForegroundColor Green
-    Write-Host "Политика указывает на: $xml" -ForegroundColor Green
+    Write-Host "Готово: Yandex Browser" -ForegroundColor Green
+    Write-Host "Ассоциаций записано: $($merged.Count) (файлы: $($fileAssocs.Count), протоколы: $($urlAssocs.Count))" -ForegroundColor Green
+    Write-Host "XML: $xml" -ForegroundColor DarkGray
 }
 
-function Prompt-Logoff {
+function Offer-Logoff {
     Write-Host ""
-    Write-Host "ВАЖНО: новые дефолты применятся при следующем входе в систему." -ForegroundColor Yellow
+    Write-Host "ВАЖНО: Windows применяет эти дефолты на ВХОДЕ в систему." -ForegroundColor Yellow
     $ans = Read-Host "Сделать выход из системы сейчас? (y/n)"
     if ($ans -match '^(?i)y$') { shutdown /l }
 }
@@ -288,7 +270,7 @@ function Prompt-Logoff {
 # ---- MAIN ----
 try {
     Write-Host ""
-    Write-Host "Что сделать?" -ForegroundColor Cyan
+    Write-Host "Выбор:" -ForegroundColor Cyan
     Write-Host "  1) Ассоциации -> 7-Zip"
     Write-Host "  2) Ассоциации -> Adobe Reader/Acrobat"
     Write-Host "  3) Ассоциации -> Yandex Browser (включая http/https)"
@@ -298,15 +280,14 @@ try {
     $choice = Read-Host "Введи 0, 1, 2 или 3"
 
     switch ($choice) {
-        "1" { Apply-7Zip;  Prompt-Logoff }
-        "2" { Apply-Adobe; Prompt-Logoff }
-        "3" { Apply-Yandex; Prompt-Logoff }
+        "1" { Apply-7Zip;  Offer-Logoff }
+        "2" { Apply-Adobe; Offer-Logoff }
+        "3" { Apply-Yandex; Offer-Logoff }
         "0" { return }
         default { Write-Host "Неверный выбор." -ForegroundColor Red }
     }
 }
 catch {
     Write-Host "Ошибка: $($_.Exception.Message)" -ForegroundColor Red
-    Write-Host $_.Exception.ToString() -ForegroundColor DarkGray
     exit 1
 }
